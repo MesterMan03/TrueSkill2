@@ -109,7 +109,10 @@ class TrueSkillThroughTime(
         require(matches.all { it.timestamp != null }) { 
             "All matches must have timestamps for TTT" 
         }
-        require(matches.zipWithNext().all { (a, b) -> a.timestamp!! <= b.timestamp!! }) {
+        
+        // Extract timestamps for validation (they're guaranteed to be non-null at this point)
+        val timestamps = matches.map { it.timestamp ?: error("Internal error: timestamp should not be null") }
+        require(timestamps.zipWithNext().all { (a, b) -> a <= b }) {
             "Matches must be in chronological order"
         }
         

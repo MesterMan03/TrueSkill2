@@ -17,13 +17,30 @@ package info.mester.trueskill
  *                      If not specified, calculated from drawProbability.
  */
 data class TrueSkillConfig(
-    val initialMean: Double = 25.0,
-    val initialStdDev: Double = 25.0 / 3.0,
-    val beta: Double = initialStdDev / 2.0,
-    val tau: Double = initialStdDev / 100.0,
+    val initialMean: Double,
+    val initialStdDev: Double,
+    val beta: Double,
+    val tau: Double,
     val drawProbability: Double = 0.0,
     val drawMargin: Double? = null
 ) {
+    /**
+     * Secondary constructor with defaults based on initialStdDev.
+     */
+    constructor(
+        initialMean: Double = 25.0,
+        initialStdDev: Double = 25.0 / 3.0,
+        drawProbability: Double = 0.0,
+        drawMargin: Double? = null
+    ) : this(
+        initialMean = initialMean,
+        initialStdDev = initialStdDev,
+        beta = initialStdDev / 2.0,
+        tau = initialStdDev / 100.0,
+        drawProbability = drawProbability,
+        drawMargin = drawMargin
+    )
+    
     init {
         require(initialMean > 0) { "Initial mean must be positive" }
         require(initialStdDev > 0) { "Initial standard deviation must be positive" }

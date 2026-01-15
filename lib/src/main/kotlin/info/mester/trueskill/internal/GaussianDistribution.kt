@@ -9,6 +9,13 @@ import kotlin.math.*
 internal object GaussianDistribution {
     
     /**
+     * Numerical stability threshold for CDF calculations.
+     * Values below this threshold in the CDF are treated specially to avoid
+     * numerical instability when computing the V function (PDF/CDF ratio).
+     */
+    private const val CDF_STABILITY_THRESHOLD = 2.222758749e-162
+    
+    /**
      * Probability density function (PDF) for a standard normal distribution.
      */
     fun standardNormalPdf(x: Double): Double {
@@ -107,7 +114,7 @@ internal object GaussianDistribution {
         val pdf = standardNormalPdf(x)
         val cdf = standardNormalCdf(x)
         
-        return if (cdf < 2.222758749e-162) {
+        return if (cdf < CDF_STABILITY_THRESHOLD) {
             -x
         } else {
             pdf / cdf

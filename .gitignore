@@ -18,3 +18,6 @@ Thumbs.db
 *.log
 *.tmp
 *~
+
+# Examples (for reference only)
+examples/

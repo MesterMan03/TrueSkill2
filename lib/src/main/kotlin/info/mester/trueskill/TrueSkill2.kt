@@ -190,8 +190,9 @@ class TrueSkill2(val config: TrueSkillConfig = TrueSkillConfig.default()) {
                 val performanceStdDev = sqrt(sumVariance)
                 
                 val adjustedDelta = comparison * deltaMean
-                val v = GaussianDistribution.vFunction(adjustedDelta, performanceStdDev)
-                val w = GaussianDistribution.wFunction(adjustedDelta, performanceStdDev)
+                val alpha = adjustedDelta / performanceStdDev
+                val v = GaussianDistribution.vFunction(alpha, 0.0) / performanceStdDev
+                val w = GaussianDistribution.wFunction(alpha, 0.0) / (performanceStdDev * performanceStdDev)
                 
                 meanDelta += comparison * v
                 varianceDelta += w
