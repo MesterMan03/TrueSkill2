@@ -48,13 +48,6 @@ data class Rating(
         get() = mean - 3.0 * standardDeviation
     
     /**
-     * Creates a new rating with the same parameters.
-     */
-    fun copy(mean: Double = this.mean, standardDeviation: Double = this.standardDeviation): Rating {
-        return Rating(mean, standardDeviation)
-    }
-    
-    /**
      * Apply skill decay over time (for TrueSkill Through Time).
      * Increases uncertainty based on time elapsed.
      * 

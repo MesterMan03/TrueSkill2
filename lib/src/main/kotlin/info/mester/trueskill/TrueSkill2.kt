@@ -136,13 +136,16 @@ class TrueSkill2(val config: TrueSkillConfig = TrueSkillConfig.default()) {
         val w: Double
         
         if (isDraw) {
-            v = GaussianDistribution.vFunction(drawMargin - deltaMean, performanceStdDev) -
-                GaussianDistribution.vFunction(-drawMargin - deltaMean, performanceStdDev)
-            w = GaussianDistribution.wFunction(drawMargin - deltaMean, performanceStdDev) +
-                GaussianDistribution.wFunction(-drawMargin - deltaMean, performanceStdDev)
+            val alpha1 = (drawMargin - deltaMean) / performanceStdDev
+            val alpha2 = (-drawMargin - deltaMean) / performanceStdDev
+            v = (GaussianDistribution.vFunction(alpha1, 0.0) - 
+                 GaussianDistribution.vFunction(alpha2, 0.0)) / performanceStdDev
+            w = ((GaussianDistribution.wFunction(alpha1, 0.0) + 
+                  GaussianDistribution.wFunction(alpha2, 0.0)) / (performanceStdDev * performanceStdDev))
         } else {
-            v = GaussianDistribution.vFunction(deltaMean, performanceStdDev)
-            w = GaussianDistribution.wFunction(deltaMean, performanceStdDev)
+            val alpha = deltaMean / performanceStdDev
+            v = GaussianDistribution.vFunction(alpha, 0.0) / performanceStdDev
+            w = GaussianDistribution.wFunction(alpha, 0.0) / (performanceStdDev * performanceStdDev)
         }
         
         // Update each player
@@ -222,16 +225,15 @@ class TrueSkill2(val config: TrueSkillConfig = TrueSkillConfig.default()) {
             
             // Calculate player's contribution to team variance
             val teamVariance = teamRating.standardDeviation * teamRating.standardDeviation
-            val varianceRatio = variance / teamVariance
             
             // Apply update with partial play factor
-            val meanMultiplier = varianceRatio * player.partialPlayPercentage
-            val varianceMultiplier = varianceRatio * varianceRatio * player.partialPlayPercentage * player.partialPlayPercentage
+            val meanChange = sign * variance * v * player.partialPlayPercentage
+            val varianceChange = variance * variance * w * player.partialPlayPercentage * player.partialPlayPercentage
             
-            val newMean = playerRating.mean + sign * meanMultiplier * v * teamVariance
-            val newVariance = variance * (1.0 - varianceMultiplier * w)
+            val newMean = playerRating.mean + meanChange
+            val newVariance = variance - varianceChange
             
-            // Ensure variance doesn't become negative
+            // Ensure variance doesn't become negative or too small
             val finalVariance = maxOf(newVariance, variance * 0.01)
             val newStdDev = sqrt(finalVariance)
             
