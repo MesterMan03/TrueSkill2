@@ -1,273 +1,178 @@
-# TrueSkill2
-A Kotlin implementation of Microsoft's TrueSkill2 skill rating system.
+# TrueSkill 2 for Kotlin
 
-## Overview
+A JVM implementation of Microsoft's TrueSkill 2 Bayesian skill-rating model, licensed under Apache-2.0.
 
-TrueSkill2 is a Bayesian skill rating system designed for multiplayer games. This implementation provides:
+The library supports:
 
-- **TrueSkill2**: The core algorithm for rating players based on match outcomes
-- **TrueSkill Through Time (TTT)**: Extension that accounts for temporal dynamics and skill changes over time
-- **Pure Kotlin**: Uses native Kotlin standard library without external dependencies
-- **Clear API**: Opinionated public API with well-defined internal components
-
-## Features
-
-- ✅ 1v1 matches
-- ✅ Team-based matches
-- ✅ Free-for-all matches (multiple teams)
-- ✅ Draw/tie handling
-- ✅ Partial play percentage (quit penalty)
-- ✅ Skill uncertainty tracking
-- ✅ Temporal dynamics (TrueSkill Through Time)
-- ✅ Match quality calculation
-- ✅ Win probability prediction
+- correct TrueSkill factor-graph inference for head-to-head, teams, free-for-all, ties, and partial play;
+- TrueSkill 2 squad offsets, experience drift, individual-statistic evidence, and quit evidence;
+- persistent base plus mode-offset ratings for correlated game modes;
+- online inference and forward/backward TrueSkill Through Time history smoothing;
+- match quality, win probability, and draw probability;
+- immutable public models and a dependency-free runtime.
 
 ## Installation
 
-Add this library to your project (adjust based on your build system):
+After the first stable release is published to Maven Central:
 
-### Gradle (Kotlin DSL)
 ```kotlin
 dependencies {
-    implementation("info.mester:trueskill2:1.0.0")
+    implementation("info.mester:trueskill2:0.1.0")
 }
 ```
 
-### Gradle (Groovy)
-```groovy
+Until then, publish a local snapshot:
+
+```shell
+./gradlew :lib:publishToMavenLocal
+```
+
+```kotlin
+repositories {
+    mavenLocal()
+    mavenCentral()
+}
+
 dependencies {
-    implementation 'info.mester:trueskill2:1.0.0'
+    implementation("info.mester:trueskill2:0.1.0-SNAPSHOT")
 }
 ```
 
-## Usage
+The generated binary is `trueskill2-<version>.jar`, accompanied by source and Dokka documentation JARs.
 
-### Basic 1v1 Match
-
-```kotlin
-import info.mester.trueskill.*
-
-// Create players with default ratings
-val alice = Player("Alice")
-val bob = Player("Bob")
-
-// Create calculator
-val trueskill = TrueSkill2()
-
-// Create match (Alice wins, Bob loses)
-val team1 = Team(alice, rank = 1)
-val team2 = Team(bob, rank = 2)
-val match = Match(team1, team2)
-
-// Update ratings
-val result = trueskill.updateRatings(match)
-
-// Get updated players
-val updatedAlice = result.teams[0].players[0]
-val updatedBob = result.teams[1].players[0]
-
-println("Alice: ${updatedAlice.rating}") // Rating increased
-println("Bob: ${updatedBob.rating}")     // Rating decreased
-```
-
-### Team-Based Match
+## Classic match outcome
 
 ```kotlin
-val team1 = Team(
-    Player("Alice"),
-    Player("Bob"),
-    rank = 1 // Winners
-)
+import info.mester.trueskill.Match
+import info.mester.trueskill.Player
+import info.mester.trueskill.Team
+import info.mester.trueskill.TrueSkill2
+import info.mester.trueskill.TrueSkillConfig
 
-val team2 = Team(
-    Player("Charlie"),
-    Player("Dave"),
-    rank = 2 // Losers
-)
+val ratings = TrueSkill2(TrueSkillConfig.withDraws(drawProbability = 0.1))
 
-val match = Match(team1, team2)
-val result = trueskill.updateRatings(match)
-```
-
-### Free-for-All (Multiple Teams)
-
-```kotlin
-val teams = listOf(
-    Team(Player("Alice"), rank = 1),  // 1st place
-    Team(Player("Bob"), rank = 2),    // 2nd place
-    Team(Player("Charlie"), rank = 3), // 3rd place
-    Team(Player("Dave"), rank = 4)    // 4th place
-)
-
-val match = Match(teams)
-val result = trueskill.updateRatings(match)
-```
-
-### Draw/Tie Handling
-
-```kotlin
-val team1 = Team(Player("Alice"), rank = 1)
-val team2 = Team(Player("Bob"), rank = 1) // Same rank = draw
-
-val match = Match(team1, team2)
-val result = trueskill.updateRatings(match)
-```
-
-### Win Probability
-
-```kotlin
-val alice = Player("Alice", Rating(30.0, 5.0))
-val bob = Player("Bob", Rating(20.0, 5.0))
-
-val winProbability = trueskill.calculateWinProbability(
-    Team(alice),
-    Team(bob)
-)
-
-println("Alice win probability: ${(winProbability * 100).toInt()}%")
-```
-
-### Match Quality
-
-```kotlin
-val quality = trueskill.calculateMatchQuality(team1, team2)
-println("Match quality: ${(quality * 100).toInt()}%") // 0-100%, higher is more balanced
-```
-
-### Quit Penalty (Partial Play)
-
-```kotlin
-val fullPlayer = Player("FullGame", partialPlayPercentage = 1.0)
-val quitter = Player("Quitter", partialPlayPercentage = 0.3) // Only played 30%
-
-val team1 = Team(fullPlayer, rank = 1)
-val team2 = Team(quitter, rank = 2)
-
-// Quitter's rating will change less due to partial participation
-val result = trueskill.updateRatings(Match(team1, team2))
-```
-
-### TrueSkill Through Time
-
-TrueSkill Through Time accounts for time between matches, increasing uncertainty as time passes.
-
-```kotlin
-import info.mester.trueskill.*
-
-val ttt = TrueSkillThroughTime(timeUnit = TrueSkillThroughTime.TimeUnit.DAYS)
-
-// Create match history with timestamps
-val matches = listOf(
+val result = ratings.updateRatings(
     Match(
-        Team(Player("Alice"), rank = 1),
-        Team(Player("Bob"), rank = 2),
-        timestamp = 1000L // Day 1
+        Team(Player("alice"), rank = 1),
+        Team(Player("bob"), rank = 2),
     ),
-    Match(
-        Team(Player("Alice"), rank = 1),
-        Team(Player("Bob"), rank = 2),
-        timestamp = 2000L // Day 2
+)
+
+val alice = result.teams.flatMap { it.players }.single { it.id == "alice" }
+println(alice.rating)
+```
+
+Ranks are placements: lower is better, and equal ranks represent a draw. Player order and team input order do not affect inference or output ordering.
+
+## TrueSkill 2 evidence
+
+```kotlin
+import info.mester.trueskill.QuitModel
+import info.mester.trueskill.StatisticModel
+
+val config = TrueSkillConfig().copy(
+    squadOffsets = mapOf(
+        1 to 0.0,
+        2 to 0.35,
+        3 to 0.8,
+        4 to 1.4,
     ),
+    experienceOffsets = List(200) { games ->
+        0.3 / (games + 1.0)
+    },
+    statisticModels = mapOf(
+        "kills" to StatisticModel(
+            playerPerformanceWeight = 0.8,
+            opponentPerformanceWeight = -0.3,
+            variancePerTimeUnit = 4.0,
+        ),
+        "deaths" to StatisticModel(
+            playerPerformanceWeight = -0.6,
+            opponentPerformanceWeight = 0.4,
+            variancePerTimeUnit = 4.0,
+        ),
+    ),
+    quitModel = QuitModel(
+        underperformanceMean = -0.25,
+        variance = 2.0,
+    ),
+)
+
+val calculator = TrueSkill2(config)
+val player = Player(
+    id = "alice",
+    partialPlayPercentage = 0.75,
+    squadId = "party-42",
+    statistics = mapOf("kills" to 12.0, "deaths" to 4.0),
+    quit = false,
+    experience = 17,
+)
+```
+
+Those numeric parameters are illustrative, not recommended Minecraft tuning. Fit them against held-out match data and evaluate predictive calibration before enabling them in production.
+
+## Correlated game modes
+
+```kotlin
+import info.mester.trueskill.ModeCorrelationConfig
+import info.mester.trueskill.TrueSkill2State
+
+val calculator = TrueSkill2(
+    TrueSkillConfig().copy(
+        modeCorrelation = ModeCorrelationConfig(
+            baseWeight = 1.0,
+            initialBaseStdDev = 4.0,
+        ),
+    ),
+)
+
+var state = TrueSkill2State()
+val update = calculator.updateRatings(
     Match(
-        Team(Player("Alice"), rank = 2),
-        Team(Player("Bob"), rank = 1),
-        timestamp = 3000L // Day 3
-    )
+        teams = listOf(
+            Team(Player("alice"), rank = 1),
+            Team(Player("bob"), rank = 2),
+        ),
+        mode = "bedwars-solo",
+    ),
+    state,
 )
+state = update.state
 
-// Process entire history (automatically applies dynamics)
-val results = ttt.processMatchHistory(matches)
-
-// Get player's rating history
-val aliceHistory = ttt.getPlayerHistory("Alice", results)
-aliceHistory.forEach { timestamped ->
-    println("Time ${timestamped.timestamp}: ${timestamped.rating}")
-}
-
-// Predict future rating (uncertainty grows over time)
-val player = Player("Alice", Rating(30.0, 5.0))
-val futureRating = ttt.predictFutureRating(player, currentTime = 1000L, futureTime = 31000L)
-println("Future rating: $futureRating") // Higher uncertainty
+val aliceTeamsRating = calculator.rating("alice", "bedwars-teams", state)
 ```
 
-### Custom Configuration
+Store `TrueSkill2State` as hidden matchmaking state. A public rank or leaderboard score should be projected from the hidden rating separately and must not feed back into matchmaking inference.
+
+## TrueSkill Through Time
 
 ```kotlin
-val config = TrueSkillConfig(
-    initialMean = 25.0,           // Starting skill mean
-    initialStdDev = 25.0 / 3.0,   // Starting uncertainty
-    beta = 25.0 / 6.0,            // Performance variation
-    tau = 25.0 / 300.0,           // Dynamics factor
-    drawProbability = 0.1         // 10% draw probability
-)
+import info.mester.trueskill.TrueSkillThroughTime
 
-val trueskill = TrueSkill2(config)
+val historyModel = TrueSkillThroughTime()
+val smoothedMatches = historyModel.processMatchHistory(matchesInTimestampOrder)
 ```
 
-### Presets
+This is batch smoothing, not a chronological replay: evidence is propagated repeatedly forward and backward, so a later result can revise an earlier estimate.
 
-```kotlin
-// Default configuration
-val defaultConfig = TrueSkillConfig.default()
+## Verification and documentation
 
-// Configuration with draws
-val withDraws = TrueSkillConfig.withDraws(drawProbability = 0.15)
-
-// Gears of War 4 configuration (from Microsoft's paper)
-val gow4Config = TrueSkillConfig.gearsOfWar4()
+```shell
+./gradlew check
+./gradlew :lib:dokkaGeneratePublicationHtml
+./gradlew :lib:sourcesJar :lib:dokkaJavadocJar
 ```
 
-## API Design
+Generated HTML documentation is written to `lib/build/dokka/html` and deployed to GitHub Pages by the documentation workflow.
 
-### Public API (`info.mester.trueskill` package)
+See [PUBLISHING.md](PUBLISHING.md) for the one-time Maven Central setup and release process.
 
-- `Rating`: Represents a player's skill as a Gaussian distribution
-- `Player`: Represents a player with ID and rating
-- `Team`: Represents a team of players with rank
-- `Match`: Represents a match with multiple teams
-- `TrueSkill2`: Main calculator for rating updates
-- `TrueSkillConfig`: Configuration parameters
-- `TrueSkillThroughTime`: Extension for temporal dynamics
+## References
 
-### Internal API (`info.mester.trueskill.internal` package)
-
-- `GaussianDistribution`: Statistical utilities (not part of public API)
-
-## Algorithm Details
-
-This implementation is based on Microsoft's TrueSkill2 paper:
-- **Paper**: "TrueSkill2: An Improved Bayesian Skill Rating System"
-- **Authors**: Tom Minka, et al.
-- **Source**: https://www.microsoft.com/en-us/research/publication/trueskill2/
-
-### Key Concepts
-
-- **Skill Rating**: Represented as μ (mean) and σ (standard deviation)
-- **Conservative Rating**: μ - 3σ (99.7% confidence interval)
-- **Dynamics**: Uncertainty grows over time to account for skill changes
-- **Partial Play**: Players who quit early receive reduced rating updates
-
-## Testing
-
-Run tests with:
-
-```bash
-./gradlew test
-```
-
-## Building
-
-Build the project with:
-
-```bash
-./gradlew build
-```
+- [TrueSkill 2: An improved Bayesian skill rating system](https://www.microsoft.com/en-us/research/publication/trueskill-2-improved-bayesian-skill-rating-system/)
+- [TrueSkill: A Bayesian Skill Rating System](https://www.microsoft.com/en-us/research/publication/trueskilltm-a-bayesian-skill-rating-system/)
+- [TrueSkill Through Time](https://www.microsoft.com/en-us/research/publication/trueskill-through-time-revisiting-the-history-of-chess/)
 
 ## License
 
-[Specify your license here]
-
-## Contributing
-
-[Specify contribution guidelines if applicable]
-
+Copyright 2026 MesterMan03. Distributed under the [Apache License 2.0](LICENSE).

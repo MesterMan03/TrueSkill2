@@ -1,283 +1,157 @@
 package info.mester.trueskill
 
 import info.mester.trueskill.internal.GaussianDistribution
+import info.mester.trueskill.internal.inference.OnlineInference
+import kotlin.math.exp
 import kotlin.math.sqrt
 
-/**
- * Main calculator for TrueSkill2 rating system.
- *
- * This class provides methods to:
- * - Calculate win probabilities between teams
- * - Update player ratings after matches
- * - Handle various match configurations (1v1, team vs team, free-for-all)
- *
- * @property config Configuration parameters for the algorithm
- */
+/** Online TrueSkill 2 rating and prediction API. */
 class TrueSkill2(
     val config: TrueSkillConfig = TrueSkillConfig.default(),
 ) {
+    private val inference = OnlineInference(config)
+
+    fun updateRatings(match: Match): Match {
+        val ratings = inference.rate(match).ratings
+        return match.withRatings(ratings)
+    }
+
     /**
-     * Calculate the win probability for team1 against team2.
-     *
-     * @param team1 First team
-     * @param team2 Second team
-     * @return Probability that team1 wins (0.0 to 1.0)
+     * Updates persistent base/mode-offset distributions, allowing evidence from one mode to
+     * improve a player's initial estimate in other modes.
      */
+    fun updateRatings(
+        match: Match,
+        state: TrueSkill2State,
+    ): RatingUpdate {
+        require(config.modeCorrelation != null) {
+            "modeCorrelation must be configured when using persistent TrueSkill2State"
+        }
+        val result = inference.rate(match, state)
+        return RatingUpdate(match.withRatings(result.ratings), requireNotNull(result.state))
+    }
+
+    /** Returns the marginal rating for a mode from persistent correlated-mode state. */
+    fun rating(
+        playerId: String,
+        mode: String,
+        state: TrueSkill2State,
+    ): Rating {
+        val correlation =
+            requireNotNull(config.modeCorrelation) {
+                "modeCorrelation must be configured when reading persistent TrueSkill2State"
+            }
+        val player = state.players[playerId] ?: return config.defaultRating()
+        val offset = player.modeOffsets[mode] ?: defaultModeOffset()
+        return Rating(
+            correlation.baseWeight * player.base.mean + offset.mean,
+            sqrt(
+                correlation.baseWeight * correlation.baseWeight *
+                    player.base.standardDeviation * player.base.standardDeviation +
+                    offset.standardDeviation * offset.standardDeviation,
+            ),
+        )
+    }
+
     fun calculateWinProbability(
         team1: Team,
         team2: Team,
     ): Double {
-        val teamRating1 = calculateTeamRating(team1)
-        val teamRating2 = calculateTeamRating(team2)
-
-        val deltaMean = teamRating1.mean - teamRating2.mean
-        val sumVariance =
-            teamRating1.standardDeviation * teamRating1.standardDeviation +
-                teamRating2.standardDeviation * teamRating2.standardDeviation
-        val performanceStdDev = sqrt(sumVariance + 2.0 * config.beta * config.beta)
-
-        return GaussianDistribution.standardNormalCdf(deltaMean / performanceStdDev)
+        val first = teamPerformance(team1)
+        val second = teamPerformance(team2)
+        val differenceStdDev = sqrt(first.variance + second.variance)
+        val performanceNoise =
+            config.beta *
+                sqrt(
+                    team1.players.sumOf { it.partialPlayPercentage * it.partialPlayPercentage } +
+                        team2.players.sumOf { it.partialPlayPercentage * it.partialPlayPercentage },
+                )
+        val margin = config.drawMarginForPerformanceNoise(performanceNoise)
+        return GaussianDistribution.standardNormalCdf((first.mean - second.mean - margin) / differenceStdDev)
     }
 
-    /**
-     * Calculate the draw probability between two teams.
-     *
-     * @param team1 First team
-     * @param team2 Second team
-     * @return Probability of a draw (0.0 to 1.0)
-     */
     fun calculateDrawProbability(
         team1: Team,
         team2: Team,
     ): Double {
-        val teamRating1 = calculateTeamRating(team1)
-        val teamRating2 = calculateTeamRating(team2)
-
-        val deltaMean = teamRating1.mean - teamRating2.mean
-        val sumVariance =
-            teamRating1.standardDeviation * teamRating1.standardDeviation +
-                teamRating2.standardDeviation * teamRating2.standardDeviation
-        val performanceStdDev = sqrt(sumVariance + 2.0 * config.beta * config.beta)
-
-        val drawMargin = config.effectiveDrawMargin
-        val high = GaussianDistribution.standardNormalCdf((drawMargin - deltaMean) / performanceStdDev)
-        val low = GaussianDistribution.standardNormalCdf((-drawMargin - deltaMean) / performanceStdDev)
-
-        return high - low
+        val first = teamPerformance(team1)
+        val second = teamPerformance(team2)
+        val stdDev = sqrt(first.variance + second.variance)
+        val performanceNoise =
+            config.beta *
+                sqrt(
+                    team1.players.sumOf { it.partialPlayPercentage * it.partialPlayPercentage } +
+                        team2.players.sumOf { it.partialPlayPercentage * it.partialPlayPercentage },
+                )
+        val margin = config.drawMarginForPerformanceNoise(performanceNoise)
+        val delta = first.mean - second.mean
+        return GaussianDistribution.standardNormalCdf((margin - delta) / stdDev) -
+            GaussianDistribution.standardNormalCdf((-margin - delta) / stdDev)
     }
 
-    /**
-     * Calculate match quality - a measure from 0 to 1 indicating how evenly matched the teams are.
-     * Higher values indicate more balanced matches.
-     *
-     * @param teams All teams in the match
-     * @return Match quality (0.0 to 1.0)
-     */
     fun calculateMatchQuality(vararg teams: Team): Double {
         require(teams.size >= 2) { "Need at least 2 teams" }
-
-        if (teams.size == 2) {
-            val team1Rating = calculateTeamRating(teams[0])
-            val team2Rating = calculateTeamRating(teams[1])
-
-            val deltaMean = team1Rating.mean - team2Rating.mean
-            val sumVariance =
-                team1Rating.standardDeviation * team1Rating.standardDeviation +
-                    team2Rating.standardDeviation * team2Rating.standardDeviation +
-                    2.0 * config.beta * config.beta
-
-            val expValue = deltaMean * deltaMean / (2.0 * sumVariance)
-            return kotlin.math.exp(-expValue)
+        if (teams.size > 2) {
+            return teams.indices
+                .flatMap { left -> ((left + 1)..<teams.size).map { right -> left to right } }
+                .map { (left, right) -> calculateMatchQuality(teams[left], teams[right]) }
+                .average()
         }
 
-        // For multiple teams, use average pairwise quality
-        var totalQuality = 0.0
-        var pairCount = 0
-
-        for (i in teams.indices) {
-            for (j in (i + 1) until teams.size) {
-                totalQuality += calculateMatchQuality(teams[i], teams[j])
-                pairCount++
-            }
-        }
-
-        return if (pairCount > 0) totalQuality / pairCount else 0.0
-    }
-
-    /**
-     * Update player ratings after a match.
-     *
-     * @param match The match result with teams and rankings
-     * @return Updated match with new player ratings
-     */
-    fun updateRatings(match: Match): Match {
-        // For 2-team matches, use efficient pairwise update
-        if (match.isTwoTeamMatch) {
-            return updateRatingsTwoTeam(match)
-        }
-
-        // For multi-team matches, use iterative approach
-        return updateRatingsMultiTeam(match)
-    }
-
-    /**
-     * Update ratings for a two-team match (optimized).
-     */
-    private fun updateRatingsTwoTeam(match: Match): Match {
-        val teams = match.sortedTeams
-        val team1 = teams[0]
-        val team2 = teams[1]
-
-        val isDraw = team1.rank == team2.rank
-
-        val team1Rating = calculateTeamRating(team1)
-        val team2Rating = calculateTeamRating(team2)
-
-        // Calculate performance difference
-        val deltaMean = team1Rating.mean - team2Rating.mean
-        val sumVariance =
-            team1Rating.standardDeviation * team1Rating.standardDeviation +
-                team2Rating.standardDeviation * team2Rating.standardDeviation +
-                2.0 * config.beta * config.beta
-        val performanceStdDev = sqrt(sumVariance)
-
-        // Calculate v and w functions
-        val drawMargin = config.effectiveDrawMargin
-        val v: Double
-        val w: Double
-
-        if (isDraw) {
-            val alpha1 = (drawMargin - deltaMean) / performanceStdDev
-            val alpha2 = (-drawMargin - deltaMean) / performanceStdDev
-            v = (
-                GaussianDistribution.vFunction(alpha1, 0.0) -
-                    GaussianDistribution.vFunction(alpha2, 0.0)
-            ) / performanceStdDev
-            w = (
+        val first = teamPerformance(teams[0], includePerformanceNoise = false)
+        val second = teamPerformance(teams[1], includePerformanceNoise = false)
+        val skillVariance = first.variance + second.variance
+        val performanceVariance =
+            config.beta * config.beta *
                 (
-                    GaussianDistribution.wFunction(alpha1, 0.0) +
-                        GaussianDistribution.wFunction(alpha2, 0.0)
-                ) / (performanceStdDev * performanceStdDev)
-            )
-        } else {
-            val alpha = deltaMean / performanceStdDev
-            v = GaussianDistribution.vFunction(alpha, 0.0) / performanceStdDev
-            w = GaussianDistribution.wFunction(alpha, 0.0) / (performanceStdDev * performanceStdDev)
-        }
-
-        // Update each player
-        val updatedTeam1 = updateTeamPlayers(team1, team1Rating, v, w, 1.0)
-        val updatedTeam2 = updateTeamPlayers(team2, team2Rating, v, w, -1.0)
-
-        return match.copy(teams = listOf(updatedTeam1, updatedTeam2))
+                    teams[0].players.sumOf { it.partialPlayPercentage * it.partialPlayPercentage } +
+                        teams[1].players.sumOf { it.partialPlayPercentage * it.partialPlayPercentage }
+                )
+        val totalVariance = skillVariance + performanceVariance
+        val delta = first.mean - second.mean
+        return sqrt(performanceVariance / totalVariance) * exp(-(delta * delta) / (2.0 * totalVariance))
     }
 
-    /**
-     * Update ratings for multi-team matches using ranking approach.
-     */
-    private fun updateRatingsMultiTeam(match: Match): Match {
-        val sortedTeams = match.sortedTeams
-        val updatedTeams = mutableListOf<Team>()
-
-        // Process each team against all others
-        for (i in sortedTeams.indices) {
-            val currentTeam = sortedTeams[i]
-            val currentRating = calculateTeamRating(currentTeam)
-
-            var meanDelta = 0.0
-            var varianceDelta = 0.0
-
-            // Compare with each other team
-            for (j in sortedTeams.indices) {
-                if (i == j) continue
-
-                val otherTeam = sortedTeams[j]
-                val otherRating = calculateTeamRating(otherTeam)
-
-                val comparison =
-                    when {
-                        currentTeam.rank < otherTeam.rank -> 1 // Current team won
-                        currentTeam.rank > otherTeam.rank -> -1 // Current team lost
-                        else -> 0 // Draw
-                    }
-
-                val deltaMean = currentRating.mean - otherRating.mean
-                val sumVariance =
-                    currentRating.standardDeviation * currentRating.standardDeviation +
-                        otherRating.standardDeviation * otherRating.standardDeviation +
-                        2.0 * config.beta * config.beta
-                val performanceStdDev = sqrt(sumVariance)
-
-                val adjustedDelta = comparison * deltaMean
-                val alpha = adjustedDelta / performanceStdDev
-                val v = GaussianDistribution.vFunction(alpha, 0.0) / performanceStdDev
-                val w = GaussianDistribution.wFunction(alpha, 0.0) / (performanceStdDev * performanceStdDev)
-
-                meanDelta += comparison * v
-                varianceDelta += w
-            }
-
-            // Average the deltas
-            val teamCount = sortedTeams.size - 1
-            meanDelta /= teamCount
-            varianceDelta /= (teamCount * teamCount)
-
-            val updatedTeam = updateTeamPlayers(currentTeam, currentRating, meanDelta, varianceDelta, 1.0)
-            updatedTeams.add(updatedTeam)
-        }
-
-        return match.copy(teams = updatedTeams)
-    }
-
-    /**
-     * Update all players in a team based on the team's performance.
-     */
-    private fun updateTeamPlayers(
+    private fun teamPerformance(
         team: Team,
-        teamRating: Rating,
-        v: Double,
-        w: Double,
-        sign: Double,
-    ): Team {
-        val updatedPlayers =
-            team.players.map { player ->
-                val playerRating = player.rating
-                val variance = playerRating.standardDeviation * playerRating.standardDeviation
-
-                // Calculate player's contribution to team variance
-                val teamVariance = teamRating.standardDeviation * teamRating.standardDeviation
-
-                // Apply update with partial play factor
-                val meanChange = sign * variance * v * player.partialPlayPercentage
-                val varianceChange = variance * variance * w * player.partialPlayPercentage * player.partialPlayPercentage
-
-                val newMean = playerRating.mean + meanChange
-                val newVariance = variance - varianceChange
-
-                // Ensure variance doesn't become negative or too small
-                val finalVariance = maxOf(newVariance, variance * 0.01)
-                val newStdDev = sqrt(finalVariance)
-
-                player.withRating(Rating(newMean, newStdDev))
-            }
-
-        return team.withPlayers(updatedPlayers)
-    }
-
-    /**
-     * Calculate the aggregate rating for a team.
-     * Team mean is sum of player means, team variance is sum of player variances.
-     */
-    private fun calculateTeamRating(team: Team): Rating {
-        var sumMean = 0.0
-        var sumVariance = 0.0
-
-        for (player in team.players) {
-            sumMean += player.rating.mean
-            val variance = player.rating.standardDeviation * player.rating.standardDeviation
-            sumVariance += variance
+        includePerformanceNoise: Boolean = true,
+    ): TeamPerformance {
+        val squadSizes =
+            team.players
+                .mapNotNull { it.squadId }
+                .groupingBy { it }
+                .eachCount()
+        var mean = 0.0
+        var variance = 0.0
+        team.players.forEach { player ->
+            val weight = player.partialPlayPercentage
+            val squadSize = player.squadId?.let { squadSizes[it] } ?: 1
+            mean += weight * (player.rating.mean + (config.squadOffsets[squadSize] ?: 0.0))
+            variance += weight * weight * player.rating.standardDeviation * player.rating.standardDeviation
+            if (includePerformanceNoise) variance += weight * weight * config.beta * config.beta
         }
-
-        return Rating(sumMean, sqrt(sumVariance))
+        return TeamPerformance(mean, variance)
     }
+
+    private fun defaultModeOffset(): Rating {
+        val correlation = requireNotNull(config.modeCorrelation)
+        val variance =
+            config.initialStdDev * config.initialStdDev -
+                correlation.baseWeight * correlation.baseWeight *
+                correlation.initialBaseStdDev * correlation.initialBaseStdDev
+        return Rating(config.initialMean, sqrt(variance))
+    }
+
+    private fun Match.withRatings(ratings: Map<String, Rating>): Match =
+        copy(
+            teams =
+                teams.map { team ->
+                    team.withPlayers(team.players.map { it.withRating(ratings.getValue(it.id)) })
+                },
+        )
+
+    private data class TeamPerformance(
+        val mean: Double,
+        val variance: Double,
+    )
 }
