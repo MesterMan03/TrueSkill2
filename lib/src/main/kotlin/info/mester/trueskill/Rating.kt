@@ -22,7 +22,10 @@ data class Rating(
     val standardDeviation: Double,
 ) {
     init {
-        require(standardDeviation > 0) { "Standard deviation must be positive" }
+        require(mean.isFinite()) { "Mean must be finite" }
+        require(standardDeviation > 0 && standardDeviation.isFinite()) {
+            "Standard deviation must be positive and finite"
+        }
     }
 
     /**

@@ -5,16 +5,27 @@ package info.mester.trueskill
  *
  * @property teams List of teams that participated in the match
  * @property timestamp Optional timestamp for TrueSkill Through Time calculations
+ * @property mode Stable identifier for the game mode.
+ * @property duration Length of the match in the unit used by statistic model parameters.
  */
 data class Match(
     val teams: List<Team>,
     val timestamp: Long? = null,
+    val mode: String = DEFAULT_MODE,
+    val duration: Double = 1.0,
 ) {
     init {
         require(teams.size >= 2) { "Match must have at least 2 teams" }
-        require(teams.map { it.rank }.toSet().size > 1 || teams.size == 2) {
-            "Match must have different rankings or be a 2-team match"
-        }
+        require(mode.isNotBlank()) { "Match mode must not be blank" }
+        require(duration > 0.0 && duration.isFinite()) { "Match duration must be positive and finite" }
+        val playerIds = teams.flatMap { it.players }.map { it.id }
+        require(playerIds.size == playerIds.toSet().size) { "A player may only appear once in a match" }
+        teams
+            .flatMap { team -> team.players.mapNotNull { player -> player.squadId?.let { it to team } } }
+            .groupBy({ it.first }, { it.second })
+            .forEach { (squadId, squadTeams) ->
+                require(squadTeams.distinct().size == 1) { "Squad '$squadId' cannot span multiple teams" }
+            }
     }
 
     /**
@@ -48,4 +59,8 @@ data class Match(
         get() = teams.map { it.rank }.toSet().size == 1
 
     override fun toString(): String = "Match(teams=${teams.size}, timestamp=$timestamp)"
+
+    companion object {
+        const val DEFAULT_MODE = "default"
+    }
 }

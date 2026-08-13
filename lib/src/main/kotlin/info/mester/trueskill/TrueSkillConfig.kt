@@ -1,20 +1,52 @@
 package info.mester.trueskill
 
+import info.mester.trueskill.internal.GaussianDistribution
+import kotlin.math.sqrt
+
+/** A linear-Gaussian observation model for an individual match statistic. */
+data class StatisticModel(
+    val playerPerformanceWeight: Double,
+    val opponentPerformanceWeight: Double,
+    val variancePerTimeUnit: Double,
+) {
+    init {
+        require(playerPerformanceWeight.isFinite() && opponentPerformanceWeight.isFinite())
+        require(variancePerTimeUnit > 0.0 && variancePerTimeUnit.isFinite())
+    }
+}
+
+/** Parameters for TrueSkill 2's unnormalised online quit observation. */
+data class QuitModel(
+    val underperformanceMean: Double = 0.0,
+    val variance: Double,
+) {
+    init {
+        require(underperformanceMean <= 0.0 && underperformanceMean.isFinite())
+        require(variance > 0.0 && variance.isFinite())
+    }
+}
+
+/** One-dimensional base-skill model used to correlate ratings between game modes. */
+data class ModeCorrelationConfig(
+    val baseWeight: Double = 1.0,
+    val initialBaseStdDev: Double,
+    val baseSkillChangePerMatch: Double = 0.0,
+    val baseTimeDriftPerUnit: Double = 0.0,
+) {
+    init {
+        require(baseWeight >= 0.0 && baseWeight.isFinite())
+        require(initialBaseStdDev > 0.0 && initialBaseStdDev.isFinite())
+        require(baseSkillChangePerMatch >= 0.0 && baseSkillChangePerMatch.isFinite())
+        require(baseTimeDriftPerUnit >= 0.0 && baseTimeDriftPerUnit.isFinite())
+    }
+}
+
 /**
- * Configuration parameters for the TrueSkill2 algorithm.
+ * Parameters for online TrueSkill 2 inference.
  *
- * These parameters control the behavior of skill rating calculations.
- * Default values are based on Microsoft's Gears of War 4 implementation.
- *
- * @property initialMean Initial mean skill rating for new players (μ₀)
- * @property initialStdDev Initial standard deviation for new players (σ₀)
- * @property beta Performance variation parameter. Represents the difference in skill
- *               needed for an 80% win probability. Higher values make rating changes slower.
- * @property tau Dynamics factor. Controls how quickly uncertainty grows over time
- *               to account for skill changes. Higher values increase uncertainty faster.
- * @property drawProbability Probability of a draw, used to calculate draw margin
- * @property drawMargin The margin within which a match is considered a draw.
- *                      If not specified, calculated from drawProbability.
+ * TrueSkill 2's data-dependent arrays are deliberately supplied by the caller: Microsoft
+ * learned squad and experience offsets, statistic weights, and quit parameters from each
+ * game's historical matches rather than claiming universal constants for them.
  */
 data class TrueSkillConfig(
     val initialMean: Double,
@@ -23,10 +55,14 @@ data class TrueSkillConfig(
     val tau: Double,
     val drawProbability: Double = 0.0,
     val drawMargin: Double? = null,
+    val skillChangePerMatch: Double = 0.0,
+    val squadOffsets: Map<Int, Double> = emptyMap(),
+    val experienceOffsets: List<Double> = emptyList(),
+    val statisticModels: Map<String, StatisticModel> = emptyMap(),
+    val quitModel: QuitModel? = null,
+    val modeCorrelation: ModeCorrelationConfig? = null,
+    val timeUnitMillis: Long = 86_400_000L,
 ) {
-    /**
-     * Secondary constructor with defaults based on initialStdDev.
-     */
     constructor(
         initialMean: Double = 25.0,
         initialStdDev: Double = 25.0 / 3.0,
@@ -42,52 +78,48 @@ data class TrueSkillConfig(
     )
 
     init {
-        require(initialMean > 0) { "Initial mean must be positive" }
-        require(initialStdDev > 0) { "Initial standard deviation must be positive" }
-        require(beta > 0) { "Beta must be positive" }
-        require(tau >= 0) { "Tau must be non-negative" }
-        require(drawProbability in 0.0..1.0) { "Draw probability must be between 0 and 1" }
-        drawMargin?.let { require(it >= 0) { "Draw margin must be non-negative" } }
+        require(initialMean.isFinite()) { "Initial mean must be finite" }
+        require(initialStdDev > 0.0 && initialStdDev.isFinite())
+        require(beta > 0.0 && beta.isFinite())
+        require(tau >= 0.0 && tau.isFinite())
+        require(drawProbability in 0.0..<1.0)
+        drawMargin?.let { require(it >= 0.0 && it.isFinite()) }
+        require(skillChangePerMatch >= 0.0 && skillChangePerMatch.isFinite())
+        require(squadOffsets.keys.all { it >= 1 } && squadOffsets.values.all { it.isFinite() })
+        require(experienceOffsets.size <= 200 && experienceOffsets.all { it.isFinite() })
+        require(timeUnitMillis > 0L)
+        modeCorrelation?.let {
+            require(it.baseWeight * it.initialBaseStdDev < initialStdDev) {
+                "Correlated base variance must leave positive variance for mode offsets"
+            }
+        }
     }
 
-    /**
-     * The actual draw margin used in calculations.
-     * If not explicitly set, calculated from beta and draw probability.
-     */
+    /** Compatibility value for a full-participation head-to-head match. */
     val effectiveDrawMargin: Double
-        get() =
-            drawMargin ?: (
-                beta * kotlin.math.sqrt(2.0) *
-                    info.mester.trueskill.internal.GaussianDistribution
-                        .standardNormalInverseCdf((1.0 + drawProbability) / 2.0)
-            )
+        get() = drawMarginForPerformanceNoise(beta * sqrt(2.0))
 
-    /**
-     * Creates a default rating for a new player using this configuration.
-     */
+    fun drawMarginForPerformanceNoise(performanceNoiseStdDev: Double): Double =
+        drawMargin ?: (
+            performanceNoiseStdDev *
+                GaussianDistribution.standardNormalInverseCdf((1.0 + drawProbability) / 2.0)
+        )
+
+    fun experienceOffset(matchesPlayedInMode: Int): Double =
+        if (experienceOffsets.isEmpty()) {
+            0.0
+        } else {
+            experienceOffsets[matchesPlayedInMode.coerceIn(0, minOf(199, experienceOffsets.lastIndex))]
+        }
+
     fun defaultRating(): Rating = Rating(initialMean, initialStdDev)
 
     companion object {
-        /**
-         * Default configuration based on Microsoft's recommendations.
-         */
         fun default(): TrueSkillConfig = TrueSkillConfig()
 
-        /**
-         * Configuration for games with frequent draws.
-         */
         fun withDraws(drawProbability: Double = 0.1): TrueSkillConfig = TrueSkillConfig(drawProbability = drawProbability)
 
-        /**
-         * Configuration optimized for Gears of War 4 (from the paper).
-         */
-        fun gearsOfWar4(): TrueSkillConfig =
-            TrueSkillConfig(
-                initialMean = 25.0,
-                initialStdDev = 25.0 / 3.0,
-                beta = 25.0 / 6.0,
-                tau = 25.0 / 300.0,
-                drawProbability = 0.0,
-            )
+        /** Classic 25-point scale; TrueSkill 2 feature parameters still need to be learned. */
+        fun gearsOfWar4(): TrueSkillConfig = TrueSkillConfig()
     }
 }

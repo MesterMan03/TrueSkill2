@@ -92,8 +92,66 @@ class TrueSkillThroughTimeTest {
         assertEquals(2000L, history[1].timestamp)
         assertEquals(3000L, history[2].timestamp)
 
-        // Rating should generally increase as Alice wins all matches
-        assertTrue(history[2].rating.mean > history[0].rating.mean)
+        // Future wins must propagate back into the first estimate; a forward filter cannot do this.
+        val prefixOnly = calculator.processMatchHistory(matches.take(1)).single()
+        val prefixRating =
+            prefixOnly.teams
+                .flatMap { it.players }
+                .single { it.id == "Alice" }
+                .rating
+        assertTrue(kotlin.math.abs(history[0].rating.mean - prefixRating.mean) > 1e-3)
+    }
+
+    @Test
+    fun `modes are independent unless a shared base skill is configured`() {
+        val matches =
+            listOf(
+                Match(
+                    teams = listOf(Team(Player("Alice"), rank = 1), Team(Player("Bob"), rank = 2)),
+                    mode = "duels",
+                    timestamp = 1_000L,
+                ),
+                Match(
+                    teams = listOf(Team(Player("Alice"), rank = 2), Team(Player("Charlie"), rank = 1)),
+                    mode = "teams",
+                    timestamp = 2_000L,
+                ),
+            )
+
+        val independent = TrueSkillThroughTime()
+        val independentPrefix =
+            independent
+                .processMatchHistory(matches.take(1))
+                .single()
+                .player("Alice")
+                .rating
+        val independentSmoothed =
+            independent
+                .processMatchHistory(matches)
+                .first()
+                .player("Alice")
+                .rating
+        assertEquals(independentPrefix.mean, independentSmoothed.mean, 1e-8)
+
+        val correlated =
+            TrueSkillThroughTime(
+                TrueSkillConfig().copy(
+                    modeCorrelation = ModeCorrelationConfig(baseWeight = 1.0, initialBaseStdDev = 4.0),
+                ),
+            )
+        val correlatedPrefix =
+            correlated
+                .processMatchHistory(matches.take(1))
+                .single()
+                .player("Alice")
+                .rating
+        val correlatedSmoothed =
+            correlated
+                .processMatchHistory(matches)
+                .first()
+                .player("Alice")
+                .rating
+        assertTrue(kotlin.math.abs(correlatedPrefix.mean - correlatedSmoothed.mean) > 1e-3)
     }
 
     @Test
@@ -176,4 +234,6 @@ class TrueSkillThroughTimeTest {
 
         assertTrue(prob > 0.7, "Alice should have high win probability")
     }
+
+    private fun Match.player(id: String): Player = teams.flatMap { it.players }.single { it.id == id }
 }
