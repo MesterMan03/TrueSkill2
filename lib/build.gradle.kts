@@ -13,13 +13,12 @@ plugins {
 }
 
 kotlin {
-    jvmToolchain(25)
-    compilerOptions.jvmTarget.set(JvmTarget.JVM_25)
+    compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
 }
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_25
-    targetCompatibility = JavaVersion.VERSION_25
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
 }
 
 base {
